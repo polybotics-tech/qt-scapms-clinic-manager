@@ -1,0 +1,9 @@
+<RCC>
+    <qresource prefix="/file">
+        <file>assets/calendar-days.svg</file>
+        <file>assets/clock-fading.svg</file>
+        <file>assets/siren.svg</file>
+        <file>assets/users.svg</file>
+        <file>assets/siren.png</file>
+    </qresource>
+</RCC>

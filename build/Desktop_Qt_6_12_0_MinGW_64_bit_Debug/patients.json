@@ -1,0 +1,25 @@
+{
+    "patients": [
+        {
+            "age": 25,
+            "contact": "08012345678",
+            "id": "P001",
+            "name": "John Doe",
+            "type": "General"
+        },
+        {
+            "age": 32,
+            "contact": "08098765432",
+            "id": "P002",
+            "name": "Jane Smith",
+            "type": "Emergency"
+        },
+        {
+            "age": 40,
+            "contact": "08055555555",
+            "id": "P003",
+            "name": "Michael Brown",
+            "type": "Follow-up"
+        }
+    ]
+}
