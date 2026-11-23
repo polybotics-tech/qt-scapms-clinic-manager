@@ -25,6 +25,8 @@ public:
     QDateTime getDateTime() const;
     QString getStatus() const;
 
+    void restoreState(const QDateTime &dateTime, const QString &status);
+
 private:
     QString id;
     PatientRecord *patient;

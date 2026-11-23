@@ -4,7 +4,9 @@
 #include "../models/Appointment.h"
 #include "../models/PatientRecord.h"
 
+#include <QDateTime>
 #include <QString>
+#include <algorithm>
 #include <array>
 #include <memory>
 #include <queue>
@@ -12,6 +14,18 @@
 #include <vector>
 
 namespace SCAPMS {
+
+struct AdminAction
+{
+    int id;
+    QString description;
+    QDateTime timestamp;
+    QString status;
+    bool reversible;
+
+    QString actionType;
+    QString targetId;
+};
 
 class ClinicDatabase
 {
@@ -32,10 +46,6 @@ public:
     int getWaitingCount() const;
     std::vector<PatientRecord *> getWaitingPatients() const;
 
-    //--patient data persistence
-    bool savePatientsToJson(const QString &filePath) const;
-    bool loadPatientsFromJson(const QString &filePath);
-
     //--searching algorithms
     std::vector<PatientRecord *> linearSearchPatientById(const QString &id) const;
     std::vector<PatientRecord *> binarySearchPatientByName(const QString &name) const;
@@ -55,8 +65,22 @@ public:
     const std::vector<std::unique_ptr<Appointment>> &getAppointments() const;
 
     //--administrative undo
-    void recordAdminAction(const QString &action);
+    void recordAdminAction(const QString &action,
+                           bool reversible = false,
+                           const QString &actionType = "",
+                           const QString &targetId = "");
     bool undoLastAction(QString &action);
+
+    const std::vector<AdminAction> &getAdminHistory() const;
+
+    int getTotalAdminActions() const;
+    int getReversibleAdminActions() const;
+    QString getLastAdminAction() const;
+    void clearAdminHistory();
+
+    //--complete application data persistence
+    bool saveDataToJson(const QString &filePath) const;
+    bool loadDataFromJson(const QString &filePath);
 
 private:
     //--main patient collection
@@ -76,6 +100,10 @@ private:
 
     //--administrative action history
     std::stack<QString> adminHistory;
+    std::vector<AdminAction> adminActionHistory;
+    std::stack<int> adminUndoStack;
+
+    int nextAdminActionId = 1;
 
     //--recursive search
     void recursiveSearchPatientByNameHelper(const QString &name,

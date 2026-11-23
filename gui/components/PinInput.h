@@ -7,6 +7,7 @@
 class QLineEdit;
 class QLabel;
 class QMouseEvent;
+class QTimer;
 
 class PinInput : public QWidget
 {
@@ -25,6 +26,7 @@ signals:
 
 protected:
     void mousePressEvent(QMouseEvent *event) override;
+    bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:
     QLineEdit *input;
@@ -32,6 +34,11 @@ private:
 
     void setupUI();
     void updatePinBoxes();
+
+    QTimer *blinkTimer;
+    bool blinkVisible = true;
+    bool inputFocused = false;
+    void refreshPinBoxes();
 };
 
 #endif // PININPUT_H

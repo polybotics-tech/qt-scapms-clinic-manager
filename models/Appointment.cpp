@@ -61,4 +61,10 @@ QString Appointment::getStatus() const
     return status;
 }
 
+void Appointment::restoreState(const QDateTime &dateTime, const QString &status)
+{
+    this->dateTime = dateTime;
+    this->status = status;
+}
+
 } // namespace SCAPMS

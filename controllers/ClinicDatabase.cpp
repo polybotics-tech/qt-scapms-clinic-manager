@@ -5,10 +5,13 @@
 #include "../utils/ClinicException.h"
 
 #include <QFile>
+#include <QHash>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonParseError>
+#include <QJsonValue>
+#include <QSaveFile>
 #include <QSet>
 
 #include <algorithm>
@@ -355,120 +358,6 @@ std::vector<PatientRecord *> ClinicDatabase::getWaitingPatients() const
     return result;
 }
 
-bool ClinicDatabase::savePatientsToJson(const QString &filePath) const
-{
-    QJsonArray patientArray;
-
-    for (const auto &patient : patients) {
-        QJsonObject patientObject;
-
-        patientObject["id"] = patient->getId();
-        patientObject["name"] = patient->getName();
-        patientObject["age"] = patient->getAge();
-        patientObject["contact"] = patient->getContact();
-        patientObject["type"] = patient->getPatientType();
-
-        patientArray.append(patientObject);
-    }
-
-    QJsonObject rootObject;
-    rootObject["patients"] = patientArray;
-
-    QJsonDocument document(rootObject);
-
-    QFile file(filePath);
-
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
-        return false;
-    }
-
-    file.write(document.toJson(QJsonDocument::Indented));
-    file.close();
-
-    return true;
-}
-
-bool ClinicDatabase::loadPatientsFromJson(const QString &filePath)
-{
-    QFile file(filePath);
-
-    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
-        return false;
-    }
-
-    QJsonParseError parseError;
-
-    QJsonDocument document = QJsonDocument::fromJson(file.readAll(), &parseError);
-
-    file.close();
-
-    if (parseError.error != QJsonParseError::NoError || !document.isObject()) {
-        return false;
-    }
-
-    QJsonObject rootObject = document.object();
-
-    if (!rootObject["patients"].isArray()) {
-        return false;
-    }
-
-    QJsonArray patientArray = rootObject["patients"].toArray();
-
-    std::vector<std::unique_ptr<PatientRecord>> loadedPatients;
-    QSet<QString> patientIds;
-
-    //--validate and reconstruct patient records.
-    for (const QJsonValue &value : patientArray) {
-        if (!value.isObject()) {
-            return false;
-        }
-
-        QJsonObject object = value.toObject();
-
-        if (!object["id"].isString() || !object["name"].isString() || !object["age"].isDouble()
-            || !object["contact"].isString() || !object["type"].isString()) {
-            return false;
-        }
-
-        QString id = object["id"].toString();
-        QString name = object["name"].toString();
-        int age = object["age"].toInt(-1);
-        QString contact = object["contact"].toString();
-        QString type = object["type"].toString();
-
-        if (id.trimmed().isEmpty() || name.trimmed().isEmpty() || age < 0 || age > 120
-            || contact.trimmed().isEmpty() || patientIds.contains(id) || findPatientById(id)) {
-            return false;
-        }
-
-        patientIds.insert(id);
-
-        if (type == "General") {
-            loadedPatients.push_back(std::make_unique<GeneralPatient>(id, name, age, contact));
-
-        } else if (type == "Emergency") {
-            loadedPatients.push_back(std::make_unique<EmergencyPatient>(id, name, age, contact));
-
-        } else if (type == "Follow-up") {
-            loadedPatients.push_back(std::make_unique<FollowUpPatient>(id, name, age, contact));
-
-        } else {
-            return false;
-        }
-    }
-
-    // Add validated records to the database.
-    try {
-        for (auto &patient : loadedPatients) {
-            addPatient(std::move(patient));
-        }
-    } catch (const ClinicException &) {
-        return false;
-    }
-
-    return true;
-}
-
 //--appointment management
 QString SCAPMS::ClinicDatabase::generateAppointmentId() const
 {
@@ -523,21 +412,505 @@ const std::vector<std::unique_ptr<Appointment>> &ClinicDatabase::getAppointments
 }
 
 //--administrative undo
-
-void ClinicDatabase::recordAdminAction(const QString &action)
+void SCAPMS::ClinicDatabase::recordAdminAction(const QString &action,
+                                               bool reversible,
+                                               const QString &actionType,
+                                               const QString &targetId)
 {
-    adminHistory.push(action);
+    AdminAction newAction;
+
+    newAction.id = nextAdminActionId++;
+    newAction.description = action;
+    newAction.timestamp = QDateTime::currentDateTime();
+    newAction.status = "Completed";
+    newAction.reversible = reversible;
+    newAction.actionType = actionType;
+    newAction.targetId = targetId;
+
+    adminActionHistory.push_back(newAction);
+
+    if (reversible)
+        adminUndoStack.push(newAction.id);
 }
 
-bool ClinicDatabase::undoLastAction(QString &action)
+bool SCAPMS::ClinicDatabase::undoLastAction(QString &action)
 {
-    if (adminHistory.empty()) {
+    if (adminUndoStack.empty())
+        return false;
+
+    int actionId = adminUndoStack.top();
+
+    //--find the corresponding history record
+    auto it = std::find_if(adminActionHistory.begin(),
+                           adminActionHistory.end(),
+                           [actionId](const AdminAction &item) { return item.id == actionId; });
+
+    if (it == adminActionHistory.end()) {
+        adminUndoStack.pop();
         return false;
     }
 
-    action = adminHistory.top();
+    if (it->status != "Completed" || !it->reversible) {
+        adminUndoStack.pop();
+        return false;
+    }
 
-    adminHistory.pop();
+    //--reverse the actual operation
+    if (it->actionType == "appointment_scheduled") {
+        Appointment *appointment = nullptr;
+
+        for (const auto &item : appointments) {
+            if (item->getId() == it->targetId) {
+                appointment = item.get();
+                break;
+            }
+        }
+
+        if (!appointment || appointment->getStatus() != "Scheduled")
+            return false;
+
+        if (!appointment->cancel())
+            return false;
+    } else {
+        return false;
+    }
+
+    action = it->description;
+
+    it->status = "Undone";
+    adminUndoStack.pop();
+
+    return true;
+}
+
+const std::vector<SCAPMS::AdminAction> &SCAPMS::ClinicDatabase::getAdminHistory() const
+{
+    return adminActionHistory;
+}
+
+int SCAPMS::ClinicDatabase::getTotalAdminActions() const
+{
+    return static_cast<int>(adminActionHistory.size());
+}
+
+int SCAPMS::ClinicDatabase::getReversibleAdminActions() const
+{
+    int count = 0;
+
+    for (const auto &action : adminActionHistory) {
+        if (action.reversible && action.status == "Completed")
+            count++;
+    }
+
+    return count;
+}
+
+QString SCAPMS::ClinicDatabase::getLastAdminAction() const
+{
+    if (adminActionHistory.empty())
+        return "No activity";
+
+    return adminActionHistory.back().description;
+}
+
+void SCAPMS::ClinicDatabase::clearAdminHistory()
+{
+    adminActionHistory.clear();
+
+    while (!adminUndoStack.empty())
+        adminUndoStack.pop();
+
+    while (!adminHistory.empty())
+        adminHistory.pop();
+
+    nextAdminActionId = 1;
+}
+
+//--data persistence
+bool ClinicDatabase::saveDataToJson(const QString &filePath) const
+{
+    QJsonObject rootObject;
+
+    //--patients
+    QJsonArray patientArray;
+
+    for (const auto &patient : patients) {
+        QJsonObject patientObject;
+
+        patientObject["id"] = patient->getId();
+        patientObject["name"] = patient->getName();
+        patientObject["age"] = patient->getAge();
+        patientObject["contact"] = patient->getContact();
+        patientObject["type"] = patient->getPatientType();
+
+        patientArray.append(patientObject);
+    }
+
+    rootObject["patients"] = patientArray;
+
+    //--appointments
+    QJsonArray appointmentArray;
+
+    for (const auto &appointment : appointments) {
+        QJsonObject appointmentObject;
+
+        appointmentObject["id"] = appointment->getId();
+
+        appointmentObject["patientId"] = appointment->getPatient()->getId();
+
+        appointmentObject["reason"] = appointment->getReason();
+
+        appointmentObject["dateTime"] = appointment->getDateTime().isValid()
+                                            ? appointment->getDateTime().toString(Qt::ISODateWithMs)
+                                            : QString();
+
+        appointmentObject["status"] = appointment->getStatus();
+
+        appointmentArray.append(appointmentObject);
+    }
+
+    rootObject["appointments"] = appointmentArray;
+
+    //--waiting queue
+    QJsonArray waitingQueueArray;
+
+    //--copy the queue to avoid modifying the original.
+    std::queue<PatientRecord *> queueCopy = waitingQueue;
+
+    while (!queueCopy.empty()) {
+        PatientRecord *patient = queueCopy.front();
+
+        if (patient) {
+            waitingQueueArray.append(patient->getId());
+        }
+
+        queueCopy.pop();
+    }
+
+    rootObject["waitingQueue"] = waitingQueueArray;
+
+    //--admin action history
+    QJsonArray adminHistoryArray;
+
+    for (const AdminAction &action : adminActionHistory) {
+        QJsonObject actionObject;
+
+        actionObject["id"] = action.id;
+        actionObject["description"] = action.description;
+        actionObject["timestamp"] = action.timestamp.toString(Qt::ISODateWithMs);
+        actionObject["status"] = action.status;
+        actionObject["reversible"] = action.reversible;
+        actionObject["actionType"] = action.actionType;
+        actionObject["targetId"] = action.targetId;
+
+        adminHistoryArray.append(actionObject);
+    }
+
+    rootObject["adminHistory"] = adminHistoryArray;
+
+    //--admin action undo history
+    QJsonArray undoHistoryArray;
+
+    // Preserve the stack's original top-to-bottom order.
+    std::stack<int> undoStackCopy = adminUndoStack;
+
+    while (!undoStackCopy.empty()) {
+        undoHistoryArray.append(undoStackCopy.top());
+        undoStackCopy.pop();
+    }
+
+    rootObject["undoHistory"] = undoHistoryArray;
+
+    //--additional database metadata
+    rootObject["version"] = 1;
+    rootObject["nextAdminActionId"] = nextAdminActionId;
+
+    //--write as JSON in file
+    QJsonDocument document(rootObject);
+
+    QSaveFile file(filePath);
+
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        return false;
+    }
+
+    QByteArray jsonData = document.toJson(QJsonDocument::Indented);
+
+    if (file.write(jsonData) != jsonData.size()) {
+        file.cancelWriting();
+        return false;
+    }
+
+    return file.commit();
+}
+
+bool ClinicDatabase::loadDataFromJson(const QString &filePath)
+{
+    //--read and validate JSON file
+    QFile file(filePath);
+
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        return false;
+    }
+
+    QJsonParseError parseError;
+
+    QJsonDocument document = QJsonDocument::fromJson(file.readAll(), &parseError);
+
+    file.close();
+
+    if (parseError.error != QJsonParseError::NoError || !document.isObject()) {
+        return false;
+    }
+
+    QJsonObject rootObject = document.object();
+
+    if (rootObject["version"].toInt() != 1 || !rootObject["patients"].isArray()
+        || !rootObject["appointments"].isArray() || !rootObject["waitingQueue"].isArray()
+        || !rootObject["adminHistory"].isArray() || !rootObject["undoHistory"].isArray()
+        || !rootObject["nextAdminActionId"].isDouble()) {
+        return false;
+    }
+
+    //--temporary database storage
+    std::vector<std::unique_ptr<PatientRecord>> loadedPatients;
+    std::vector<std::unique_ptr<Appointment>> loadedAppointments;
+
+    std::queue<PatientRecord *> loadedWaitingQueue;
+
+    std::vector<AdminAction> loadedAdminHistory;
+    std::stack<int> loadedUndoStack;
+
+    QHash<QString, PatientRecord *> patientLookup;
+
+    QSet<QString> patientIds;
+    QSet<QString> appointmentIds;
+    QSet<int> adminActionIds;
+    QSet<int> undoActionIds;
+
+    //--restore patients
+    QJsonArray patientArray = rootObject["patients"].toArray();
+
+    for (const QJsonValue &value : patientArray) {
+        if (!value.isObject()) {
+            return false;
+        }
+
+        QJsonObject object = value.toObject();
+
+        if (!object["id"].isString() || !object["name"].isString() || !object["age"].isDouble()
+            || !object["contact"].isString() || !object["type"].isString()) {
+            return false;
+        }
+
+        QString id = object["id"].toString();
+        QString name = object["name"].toString();
+        int age = object["age"].toInt(-1);
+        QString contact = object["contact"].toString();
+        QString type = object["type"].toString();
+
+        if (id.trimmed().isEmpty() || name.trimmed().isEmpty() || age < 0 || age > 120
+            || contact.trimmed().isEmpty() || patientIds.contains(id)) {
+            return false;
+        }
+
+        std::unique_ptr<PatientRecord> patient;
+
+        if (type == "General") {
+            patient = std::make_unique<GeneralPatient>(id, name, age, contact);
+
+        } else if (type == "Emergency") {
+            patient = std::make_unique<EmergencyPatient>(id, name, age, contact);
+
+        } else if (type == "Follow-up") {
+            patient = std::make_unique<FollowUpPatient>(id, name, age, contact);
+
+        } else {
+            return false;
+        }
+
+        patientIds.insert(id);
+
+        patientLookup.insert(id, patient.get());
+
+        loadedPatients.push_back(std::move(patient));
+    }
+
+    //--restore appointments
+    QJsonArray appointmentArray = rootObject["appointments"].toArray();
+
+    for (const QJsonValue &value : appointmentArray) {
+        if (!value.isObject()) {
+            return false;
+        }
+
+        QJsonObject object = value.toObject();
+
+        if (!object["id"].isString() || !object["patientId"].isString()
+            || !object["reason"].isString() || !object["dateTime"].isString()
+            || !object["status"].isString()) {
+            return false;
+        }
+
+        QString id = object["id"].toString();
+        QString patientId = object["patientId"].toString();
+        QString reason = object["reason"].toString();
+        QString dateTimeString = object["dateTime"].toString();
+        QString status = object["status"].toString();
+
+        if (id.trimmed().isEmpty() || reason.trimmed().isEmpty() || appointmentIds.contains(id)
+            || !patientLookup.contains(patientId)) {
+            return false;
+        }
+
+        if (status != "Pending" && status != "Scheduled" && status != "Cancelled") {
+            return false;
+        }
+
+        QDateTime dateTime;
+
+        if (!dateTimeString.isEmpty()) {
+            dateTime = QDateTime::fromString(dateTimeString, Qt::ISODateWithMs);
+
+            if (!dateTime.isValid()) {
+                dateTime = QDateTime::fromString(dateTimeString, Qt::ISODate);
+            }
+
+            if (!dateTime.isValid()) {
+                return false;
+            }
+        }
+
+        if (status == "Scheduled" && !dateTime.isValid()) {
+            return false;
+        }
+
+        PatientRecord *patient = patientLookup.value(patientId);
+
+        auto appointment = std::make_unique<Appointment>(patient, reason);
+
+        appointment->setId(id);
+
+        appointment->restoreState(dateTime, status);
+
+        appointmentIds.insert(id);
+
+        loadedAppointments.push_back(std::move(appointment));
+    }
+
+    //--restore waiting queue
+    QJsonArray waitingQueueArray = rootObject["waitingQueue"].toArray();
+
+    QSet<QString> queuedPatientIds;
+
+    for (const QJsonValue &value : waitingQueueArray) {
+        if (!value.isString()) {
+            return false;
+        }
+
+        QString patientId = value.toString();
+
+        if (!patientLookup.contains(patientId) || queuedPatientIds.contains(patientId)) {
+            return false;
+        }
+
+        queuedPatientIds.insert(patientId);
+
+        loadedWaitingQueue.push(patientLookup.value(patientId));
+    }
+
+    //--restore admin action history
+    QJsonArray adminHistoryArray = rootObject["adminHistory"].toArray();
+
+    int maximumActionId = 0;
+
+    for (const QJsonValue &value : adminHistoryArray) {
+        if (!value.isObject()) {
+            return false;
+        }
+
+        QJsonObject object = value.toObject();
+
+        if (!object["id"].isDouble() || !object["description"].isString()
+            || !object["timestamp"].isString() || !object["status"].isString()
+            || !object["reversible"].isBool() || !object["actionType"].isString()
+            || !object["targetId"].isString()) {
+            return false;
+        }
+
+        AdminAction action;
+
+        action.id = object["id"].toInt();
+        action.description = object["description"].toString();
+
+        action.timestamp = QDateTime::fromString(object["timestamp"].toString(), Qt::ISODateWithMs);
+
+        action.status = object["status"].toString();
+        action.reversible = object["reversible"].toBool();
+        action.actionType = object["actionType"].toString();
+        action.targetId = object["targetId"].toString();
+
+        if (action.id <= 0 || action.description.trimmed().isEmpty() || !action.timestamp.isValid()
+            || action.status.trimmed().isEmpty() || adminActionIds.contains(action.id)) {
+            return false;
+        }
+
+        adminActionIds.insert(action.id);
+
+        maximumActionId = std::max(maximumActionId, action.id);
+
+        loadedAdminHistory.push_back(action);
+    }
+
+    //--restore admin action undo
+    QJsonArray undoHistoryArray = rootObject["undoHistory"].toArray();
+
+    for (int i = undoHistoryArray.size() - 1; i >= 0; --i) {
+        QJsonValue value = undoHistoryArray[i];
+
+        if (!value.isDouble()) {
+            return false;
+        }
+
+        int actionId = value.toInt(-1);
+
+        if (!adminActionIds.contains(actionId) || undoActionIds.contains(actionId)) {
+            return false;
+        }
+
+        undoActionIds.insert(actionId);
+
+        loadedUndoStack.push(actionId);
+    }
+
+    //--
+    int loadedNextActionId = rootObject["nextAdminActionId"].toInt(-1);
+
+    if (loadedNextActionId <= maximumActionId || loadedNextActionId <= 0) {
+        return false;
+    }
+
+    //--replace existing database contents after every section passed validation.
+
+    patients = std::move(loadedPatients);
+    appointments = std::move(loadedAppointments);
+    waitingQueue = std::move(loadedWaitingQueue);
+    adminActionHistory = std::move(loadedAdminHistory);
+    adminUndoStack = std::move(loadedUndoStack);
+    nextAdminActionId = loadedNextActionId;
+
+    //--reset legacy administrative history.
+    adminHistory = std::stack<QString>();
+
+    //--rebuild recent patient list
+    recentPatients.fill(nullptr);
+
+    recentCount = 0;
+    recentIndex = 0;
+
+    for (const auto &patient : patients) {
+        addRecentPatient(patient.get());
+    }
 
     return true;
 }

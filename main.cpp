@@ -10,24 +10,20 @@ int main(int argc, char *argv[])
 
     LoginWindow loginWindow;
 
-    QObject::connect(
-        &loginWindow,
-        &LoginWindow::loginSuccessful,
-        &loginWindow,
-        [&loginWindow](const QString &role) {
+    QObject::connect(&loginWindow,
+                     &LoginWindow::loginSuccessful,
+                     &loginWindow,
+                     [&loginWindow](const QString &role) {
+                         MainWindow *mainWindow = new MainWindow();
+                         mainWindow->setProperty("userRole", role);
+                         mainWindow->applyRolePermissions();
 
-            MainWindow *mainWindow = new MainWindow();
+                         //--automatically destroy the window when closed.
+                         mainWindow->setAttribute(Qt::WA_DeleteOnClose);
 
-            //--temporarily store the authenticated role.
-            mainWindow->setProperty("userRole", role);
-
-            //--automatically destroy the window when closed.
-            mainWindow->setAttribute(Qt::WA_DeleteOnClose);
-
-            mainWindow->show();
-            loginWindow.hide();
-        }
-        );
+                         mainWindow->show();
+                         loginWindow.hide();
+                     });
 
     loginWindow.show();
 

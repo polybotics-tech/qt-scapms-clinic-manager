@@ -20,6 +20,8 @@ public:
     explicit MainWindow(QWidget *parent = nullptr);
     ~MainWindow() override;
 
+    void applyRolePermissions();
+
 private:
     Ui::MainWindow *ui;
 
@@ -45,5 +47,20 @@ private:
     void scheduleAppointment();
     void clearAppointmentForm();
     void cancelAppointment();
+
+    void setupReportsTable();
+    void generateReport();
+
+    void setupAdminTable();
+    void refreshAdminTable();
+    void refreshAdminStatistics();
+    void undoLastAdminAction();
+    void clearAdminHistory();
+
+    QString dataFilePath;
+    void saveApplicationData();
+
+protected:
+    void closeEvent(QCloseEvent *event) override;
 };
 #endif // MAINWINDOW_H
